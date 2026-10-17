@@ -1,0 +1,15 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# local state
+/data/
+HALT
+*.db
+
+# python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
