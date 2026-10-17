@@ -9,6 +9,7 @@ import pandas as pd
 
 from bot.config import Settings
 from bot.data.store import CandleStore
+from bot.live.sizing import RiskRule
 from bot.research import backtest, metrics, trials
 from bot.strategies.baseline import MACrossover
 
@@ -44,17 +45,22 @@ def main():
     print(f"{pair} {args.timeframe}: {len(df)} bars, "
           f"{df.index[0]:%Y-%m-%d} -> {df.index[-1]:%Y-%m-%d} UTC")
 
-    def run(signal: pd.Series, stops: pd.Series | None = None) -> backtest.BacktestResult:
+    def run(signal: pd.Series, stops: pd.Series | None = None,
+            rule: RiskRule | None = None) -> backtest.BacktestResult:
         return backtest.run(df["close"], signal, settings.costs_for(pair), args.timeframe,
                             settings.tds_bps, settings.tds_mode, settings.max_leverage,
-                            stop_distance=stops, ohlc=df if stops is not None else None)
+                            stop_distance=stops, ohlc=df if stops is not None else None,
+                            risk_rule=rule)
 
     strategy = MACrossover()
     params = strategy.fit(df)  # fixed defaults; nothing is fitted on this data
-    result = run(strategy.signal(df, params), strategy.stop_distance(df, params))
-    m = report(f"{strategy.name} {params}", result)
+    rule = RiskRule.from_settings(settings)  # sized by risk, as live trading sizes
+    trial_params = {**params, "sizing": "risk", "risk_pct": rule.risk_pct,
+                    "max_position_pct": rule.max_position_pct}
+    result = run(strategy.signal(df, params), strategy.stop_distance(df, params), rule)
+    m = report(f"{strategy.name} {trial_params}", result)
     with trials.connect() as conn:  # every run is a trial, logged automatically
-        trials.record(conn, kind="backtest", strategy=strategy.name, params=params,
+        trials.record(conn, kind="backtest", strategy=strategy.name, params=trial_params,
                       instrument=pair, timeframe=args.timeframe, net=result.net,
                       source="run_backtest")
     report("buy and hold (for comparison)", run(pd.Series(1.0, index=df.index)))

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pandas as pd
 import pytest
 
-from bot.config import Settings
+from bot.config import InstrumentCosts, Settings
 from bot.live.runner import PaperBot
 from bot.log import db
 from tests.test_proposer import Scripted
@@ -109,3 +109,18 @@ def test_daily_health_can_halt(make):
     # 39 flat days: 30-day Sharpe 0 is below half of a backtest Sharpe of 1.0
     problems = bot.daily_health((1.0, -0.2))
     assert problems and bot.halt_file.exists()
+
+
+def test_backtest_reference_is_sized_by_risk_like_paper(tmp_path):
+    # Stop 8,000 below 80,000 = 10% away, so 1% risk means 10% exposure. A 5% drop
+    # then costs 0.5% of equity, not the 5% a 100%-exposure backtest would show.
+    df = frame(4)
+    df.loc[df.index[2:], ["open", "low", "close"]] = 76000.0
+    s = Settings(_env_file=None, mode="paper", capital_inr=1_000_000.0,
+                 costs={"B-BTC_USDT": InstrumentCosts(fee_bps=0, slippage_bps=0,
+                                                      funding_bps_per_interval=0)})
+    bot = PaperBot(db.connect(tmp_path / "trades.db"), s, FakeStore(df), FakePublic(),
+                   FakePrivate(), Scripted([1, 1, 1, 1], dist=8000.0), "1h", None,
+                   halt_file=tmp_path / "HALT")
+    _, max_drawdown = bot.backtest_reference("B-BTC_USDT")
+    assert max_drawdown == pytest.approx(-0.005)

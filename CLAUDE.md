@@ -163,7 +163,7 @@ Phase 3 decisions (owner, 2026-10-18):
 - **Exits:** a signal flip is one "flip" proposal (close the open position, then open the new one), approved like any other. Stops are part of the approved order and close without a further tap. Close-only proposals (signal goes flat) aren't built yet; the baseline is never flat.
 - **Paper stop monitor** polls the price every ~20s and fills at the worse of the stop and the current price, plus slippage.
 - **Health check** uses realized P&L per UTC day against `capital_inr`, and the full-sample 1h BTC backtest as the reference.
-- **Known backtest/live gap, fix before Phase 4:** the backtest holds `exposure` x equity notional, while live sizes by risk with a 20% notional cap. Sharpe is roughly comparable; returns and drawdowns are not.
+- **Backtest sizes like live:** research reports, walk-forward and the paper health-check reference run the engine with a `RiskRule` (`bot/live/sizing.py`, the same formula live uses): each entry risks `risk_pct_per_trade` of equity at its stop, notional capped at `max_position_pct`, held until exit or flip. The signal's sign picks the side. Remaining differences: live rounds down to the quantity step and sizes against `capital_inr`; the engine sizes against compounding equity. The sizing rule is part of the trial's params, and `sizing.py` is part of the critic hash.
 - **Sizing:** `max_position_pct` caps notional (not margin) at 20% of `capital_inr`. A position over the cap is shrunk, not refused; leverage over `max_leverage` is refused. The owner sets `CAPITAL_INR` in `.env`.
 
 ## Risk limits (defaults, all in config)

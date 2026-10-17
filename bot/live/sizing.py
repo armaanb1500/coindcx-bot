@@ -7,6 +7,9 @@ loses that much. A wide stop means a small position; a tight stop, a bigger one.
 Then cap it: notional may not exceed max_position_pct of capital. Shrinking a
 position only lowers risk, so the cap shrinks rather than refuses. Leverage above
 the hard cap is refused outright.
+
+RiskRule holds that formula on its own, as notional / capital, so the backtest
+engine sizes with exactly the same rule live trading uses.
 """
 
 from dataclasses import dataclass
@@ -15,6 +18,24 @@ from decimal import ROUND_DOWN, Decimal
 
 class SizingRefused(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class RiskRule:
+    risk_pct: float          # of capital lost if the stop hits (before costs)
+    max_position_pct: float  # notional cap, as a fraction of capital
+
+    @classmethod
+    def from_settings(cls, s) -> "RiskRule":
+        return cls(s.risk_pct_per_trade, s.max_position_pct)
+
+    def for_risk(self, entry: float, stop_distance: float) -> float:
+        """Notional / capital at which hitting the stop loses exactly risk_pct."""
+        return self.risk_pct * entry / stop_distance
+
+    def fraction(self, entry: float, stop_distance: float) -> float:
+        """Notional / capital to hold: the risk-based size, capped at max_position_pct."""
+        return min(self.for_risk(entry, stop_distance), self.max_position_pct)
 
 
 @dataclass
@@ -52,12 +73,12 @@ def size_position(entry: float, stop: float, capital_inr: float, usdt_inr: float
     side = "buy" if stop < entry else "sell"
 
     per_unit_loss = abs(entry - stop)                      # USDT per 1 unit of the asset
-    risk_usdt = capital_inr * risk_pct / usdt_inr
-    max_notional_usdt = capital_inr * max_position_pct / usdt_inr
-
-    qty_for_risk = risk_usdt / per_unit_loss
-    qty_cap = max_notional_usdt / entry
-    qty = _floor_to_step(min(qty_for_risk, qty_cap), inst.qty_step)
+    rule = RiskRule(risk_pct, max_position_pct)
+    capital_usdt = capital_inr / usdt_inr
+    qty_for_risk = rule.for_risk(entry, per_unit_loss) * capital_usdt / entry
+    qty_cap = max_position_pct * capital_usdt / entry
+    qty = _floor_to_step(rule.fraction(entry, per_unit_loss) * capital_usdt / entry,
+                         inst.qty_step)
 
     notional = qty * entry
     if qty < inst.min_qty or notional < inst.min_notional:

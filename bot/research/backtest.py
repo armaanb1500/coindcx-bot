@@ -13,6 +13,17 @@ the low (long) or high (short) reaches the stop, the position exits at the stop,
 or at the open if the bar gapped through it. After a stop-out the position stays
 flat until the signal changes. A new position with no stop distance isn't taken.
 
+Sizing: by default the signal's value is the exposure held. With a RiskRule (the
+same rule live trading sizes with, from bot/live/sizing.py) only the signal's sign
+is used: each new entry is sized so that hitting its stop loses risk_pct of
+equity, capped at max_position_pct of equity in notional,
+
+    exposure = min(risk_pct / (stop_distance / entry_close), max_position_pct)
+
+and that exposure is held until the position closes or flips, as a live order's
+quantity would be. Live sizes against capital_inr and rounds down to the exchange's
+quantity step; the engine sizes against current equity and doesn't round.
+
 Position tracking is a plain loop because exits depend on the path; everything
 after it (costs, equity) is vectorized.
 """
@@ -23,6 +34,7 @@ import numpy as np
 import pandas as pd
 
 from bot.config import InstrumentCosts
+from bot.live.sizing import RiskRule
 from bot.timeframes import bar_length
 
 
@@ -59,8 +71,8 @@ class BacktestResult:
 
 def run(close: pd.Series, signal: pd.Series, costs: InstrumentCosts, timeframe: str,
         tds_bps: float, tds_mode: str, max_leverage: float,
-        stop_distance: pd.Series | None = None, ohlc: pd.DataFrame | None = None
-        ) -> BacktestResult:
+        stop_distance: pd.Series | None = None, ohlc: pd.DataFrame | None = None,
+        risk_rule: RiskRule | None = None) -> BacktestResult:
     if not close.index.equals(signal.index):
         raise ValueError("signal and close must share the same index")
     if tds_mode not in ("track", "cost"):
@@ -76,8 +88,14 @@ def run(close: pd.Series, signal: pd.Series, costs: InstrumentCosts, timeframe: 
             raise ValueError("stops need ohlc with open/high/low columns")
         if not (stop_distance.index.equals(close.index) and ohlc.index.equals(close.index)):
             raise ValueError("stop_distance and ohlc must share close's index")
+    if risk_rule is not None:
+        if stop_distance is None:
+            raise ValueError("risk sizing needs stop_distance: the size comes from the stop")
+        if risk_rule.max_position_pct > max_leverage:
+            raise ValueError(f"max_position_pct={risk_rule.max_position_pct} exceeds "
+                             f"max_leverage={max_leverage}")
 
-    sim = _simulate(close, signal.fillna(0.0), stop_distance, ohlc)
+    sim = _simulate(close, signal.fillna(0.0), stop_distance, ohlc, risk_rule)
     idx = close.index
     position = pd.Series(sim["position"], index=idx)
     # Simple returns, not log returns: exact for leverage and shorts.
@@ -116,7 +134,7 @@ def run(close: pd.Series, signal: pd.Series, costs: InstrumentCosts, timeframe: 
 
 
 def _simulate(close: pd.Series, target: pd.Series, stop_distance: pd.Series | None,
-              ohlc: pd.DataFrame | None) -> dict:
+              ohlc: pd.DataFrame | None, risk_rule: RiskRule | None) -> dict:
     """Walk bar by bar: what's held during each bar, and what it earned."""
     c = close.to_numpy(dtype=float)
     want_by_bar = target.to_numpy(dtype=float)
@@ -144,6 +162,10 @@ def _simulate(close: pd.Series, target: pd.Series, stop_distance: pd.Series | No
                 stop = c[t - 1] - np.sign(want) * dist[t - 1]
             else:
                 want = 0.0  # no stop available: no naked positions
+        if risk_rule is not None and want != 0:
+            # Sized once at entry from its stop, then held like a fixed order quantity.
+            size = risk_rule.fraction(c[t - 1], dist[t - 1]) if opening else abs(held)
+            want = np.sign(want) * size
         out["entry_change"][t] = want - held
         held = want
         if held == 0:

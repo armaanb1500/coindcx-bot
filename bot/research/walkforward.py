@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import pandas as pd
 
 from bot.config import InstrumentCosts
+from bot.live.sizing import RiskRule
 from bot.research import backtest, metrics
 from bot.strategies.base import Strategy
 
@@ -66,8 +67,9 @@ class WalkForwardResult:
 def walk_forward(df: pd.DataFrame, strategy: Strategy, train_bars: int, test_bars: int,
                  costs: InstrumentCosts, timeframe: str, tds_bps: float, tds_mode: str,
                  max_leverage: float, warmup_bars: int | None = None,
-                 anchored: bool = False) -> WalkForwardResult:
-    """warmup_bars defaults to the whole train window, the most warmup we can honestly give."""
+                 anchored: bool = False, risk_rule: RiskRule | None = None) -> WalkForwardResult:
+    """warmup_bars defaults to the whole train window, the most warmup we can honestly give.
+    risk_rule: size entries by risk, as live does (see backtest.run)."""
     warmup_bars = train_bars if warmup_bars is None else warmup_bars
     if warmup_bars > train_bars:
         raise ValueError("warmup can't reach further back than the train window")
@@ -91,5 +93,6 @@ def walk_forward(df: pd.DataFrame, strategy: Strategy, train_bars: int, test_bar
     oos_signal = pd.concat(signals)
     oos = df.loc[oos_signal.index]
     result = backtest.run(oos["close"], oos_signal, costs, timeframe, tds_bps, tds_mode,
-                          max_leverage, stop_distance=pd.concat(stops), ohlc=oos)
+                          max_leverage, stop_distance=pd.concat(stops), ohlc=oos,
+                          risk_rule=risk_rule)
     return WalkForwardResult(folds, result)

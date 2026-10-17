@@ -14,7 +14,7 @@ from bot.data.store import CandleStore
 from bot.live import executor, health, risk
 from bot.live.proposer import propose
 from bot.live.risk import RiskState
-from bot.live.sizing import Instrument
+from bot.live.sizing import Instrument, RiskRule
 from bot.log import db
 from bot.research import backtest, metrics
 from bot.strategies.base import Strategy
@@ -83,13 +83,15 @@ class PaperBot:
         return [m for m in message_ids if m is not None], stops
 
     def backtest_reference(self, pair: str) -> tuple[float, float]:
-        """(annualized Sharpe, max drawdown) of the strategy's backtest, for the health check."""
+        """(annualized Sharpe, max drawdown) of the strategy's backtest, for the health check.
+        Sized by risk, as paper and live are, so the comparison is like with like."""
         df = self.store.load(pair, self.timeframe)
         params = self.strategy.fit(df)
         result = backtest.run(df["close"], self.strategy.signal(df, params), self.s.costs_for(pair),
                               self.timeframe, self.s.tds_bps, self.s.tds_mode,
                               self.s.max_leverage,
-                              stop_distance=self.strategy.stop_distance(df, params), ohlc=df)
+                              stop_distance=self.strategy.stop_distance(df, params), ohlc=df,
+                              risk_rule=RiskRule.from_settings(self.s))
         m = metrics.summary(result.net, result.equity, self.timeframe)
         return m["sharpe"], m["max_drawdown"]
 

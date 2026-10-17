@@ -22,9 +22,11 @@ class Gate:
     detail: str
 
 
-# The code a critic review covers: the strategy plus the engine it runs through.
+# The code a critic review covers: the strategy plus the engine it runs through,
+# including the sizing rule the engine shares with live trading.
 # If any of it changes, the review is stale and must be redone.
-REVIEWED_CODE = ["bot/research/backtest.py", "bot/data/coindcx.py", "bot/data/store.py"]
+REVIEWED_CODE = ["bot/research/backtest.py", "bot/live/sizing.py", "bot/data/coindcx.py",
+                 "bot/data/store.py"]
 
 
 def code_hash(strategy_file: str, files: list[str] = REVIEWED_CODE) -> str:

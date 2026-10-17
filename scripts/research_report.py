@@ -14,6 +14,7 @@ import pandas as pd
 
 from bot.config import Settings
 from bot.data.store import CandleStore
+from bot.live.sizing import RiskRule
 from bot.research import backtest, gates, metrics, regimes, trials
 from bot.research.deflated import deflated_sharpe_from_returns
 from bot.research.walkforward import walk_forward
@@ -41,11 +42,16 @@ def main():
     costs = s.costs_for(pair)
     df = CandleStore().load(pair, tf)
     strategy = MACrossover()
+    # Sized by risk, exactly as paper and live trading size, so what's validated is
+    # what's traded. The sizing rule is part of the trial's identity.
+    rule = RiskRule.from_settings(s)
     run_args = dict(costs=costs, timeframe=tf, tds_bps=s.tds_bps, tds_mode=s.tds_mode,
-                    max_leverage=s.max_leverage)
+                    max_leverage=s.max_leverage, risk_rule=rule)
 
     # 1. Full-sample backtest (the trial the DSR judges).
     params = strategy.fit(df)
+    trial_params = {**params, "sizing": "risk", "risk_pct": rule.risk_pct,
+                    "max_position_pct": rule.max_position_pct}
     full = backtest.run(df["close"], strategy.signal(df, params), **run_args,
                         stop_distance=strategy.stop_distance(df, params), ohlc=df)
     full_m = metrics.summary(full.net, full.equity, tf)
@@ -60,7 +66,7 @@ def main():
     # 3. Log both runs, then deflate against every distinct trial on this market.
     with trials.connect() as conn:
         for kind, net in (("backtest", full.net), ("walkforward", wf.result.net)):
-            trials.record(conn, kind=kind, strategy=strategy.name, params=params,
+            trials.record(conn, kind=kind, strategy=strategy.name, params=trial_params,
                           instrument=pair, timeframe=tf, net=net, source="research_report")
         dsr = deflated_sharpe_from_returns(full.net, trials.trial_sharpes(conn, pair, tf))
         total_rows = trials.count_all(conn)
@@ -79,8 +85,8 @@ def main():
     ]
     passed = all(g.passed for g in results)
 
-    text = render(strategy.name, params, pair, tf, df, args, full, full_m, wf, wf_m, wf_s, dsr,
-                  total_rows, regime_table, verdict, results, passed)
+    text = render(strategy.name, trial_params, pair, tf, df, args, full, full_m, wf, wf_m, wf_s,
+                  dsr, total_rows, regime_table, verdict, results, passed)
     REPORT_DIR.mkdir(exist_ok=True)
     out = REPORT_DIR / f"{strategy.name}_{pair}_{tf}.md"
     out.write_text(text)
@@ -91,6 +97,9 @@ def main():
 def render(name, params, pair, tf, df, args, full, full_m, wf, wf_m, wf_s, dsr, total_rows,
            regime_table, verdict, results, passed):
     c = full.cost_summary()
+    held = full.bars["position"].abs()
+    held = held[held > 0]  # exposure on bars spent in a trade
+    capped = (held >= params["max_position_pct"] - 1e-12).mean() if len(held) else 0.0
     lines = [
         f"# Research report: {name} on {pair} {tf}",
         "",
@@ -104,6 +113,9 @@ def render(name, params, pair, tf, df, args, full, full_m, wf, wf_m, wf_s, dsr, 
         "",
         "## Full-sample backtest",
         "",
+        f"Sized by risk, as live: each entry risks {pct(params['risk_pct'])} of equity at its "
+        f"stop, notional capped at {pct(params['max_position_pct'])} of equity.",
+        "",
         "| Metric | Value |", "|---|---|",
         f"| Sharpe (annualized) | {full_m['sharpe']:.2f} |",
         f"| Annual return | {pct(full_m['annual_return'])} |",
@@ -111,6 +123,8 @@ def render(name, params, pair, tf, df, args, full, full_m, wf, wf_m, wf_s, dsr, 
         f"| Longest drawdown | {full_m['longest_drawdown_bars']} bars ({full_m['longest_drawdown']}) |",
         f"| Calmar | {full_m['calmar']:.2f} |",
         f"| Stop-outs | {int(full.bars['stopped'].sum())} |",
+        f"| Exposure when in a trade | median {pct(held.median())}, "
+        f"at the {pct(params['max_position_pct'])} cap on {pct(capped)} of those bars |",
         f"| Gross / net return | {pct(c['gross_return'])} / {pct(c['net_return'])} |",
         f"| Fees + slippage | {pct(c['fees_and_slippage'])} of starting capital |",
         f"| Funding | {pct(c['funding'])} of starting capital |",
