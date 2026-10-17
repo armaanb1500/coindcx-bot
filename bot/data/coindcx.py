@@ -1,9 +1,13 @@
 """Thin CoinDCX REST client.
 
-Phase 1 is public endpoints only. Signed private calls get added in Phase 3.
+PublicClient: market data, no key needed.
+PrivateClient: signed calls, limited to an explicit allowlist of read-only paths.
 Every endpoint here was checked against https://docs.coindcx.com/ and the live API.
 """
 
+import hashlib
+import hmac
+import json
 import logging
 import time
 
@@ -102,3 +106,52 @@ def _to_frame(rows: list[dict]) -> pd.DataFrame:
     df.index = pd.to_datetime(df.pop("time"), unit="ms", utc=True)
     df.index.name = "open_time"
     return df.astype(float)
+
+
+# The ONLY private paths this client will call. Order paths get added in Phase 4.
+# Withdrawal and transfer endpoints must never appear here.
+READ_ONLY_PATHS = {
+    "/exchange/v1/derivatives/futures/wallets",
+}
+
+
+def sign(body: dict, secret: str) -> tuple[str, str]:
+    """Docs: payload = compact JSON of the body; signature = HMAC-SHA256(payload, secret) hex.
+
+    Returns (payload, signature). The exact payload string must be what gets sent,
+    or the signature won't match on CoinDCX's side.
+    """
+    payload = json.dumps(body, separators=(",", ":"))
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return payload, signature
+
+
+class PrivateClient:
+    def __init__(self, api_key: str, api_secret: str, http: httpx.Client | None = None):
+        if not api_key or not api_secret:
+            raise CoinDCXError("COINDCX_API_KEY / COINDCX_API_SECRET missing from .env")
+        self._key = api_key
+        self._secret = api_secret
+        self.http = http or httpx.Client(timeout=30)
+
+    def __repr__(self) -> str:
+        return "PrivateClient(<redacted>)"
+
+    def _signed_request(self, method: str, path: str, body: dict | None = None) -> object:
+        if path not in READ_ONLY_PATHS:
+            raise CoinDCXError(f"{path} is not on the allowlist of private paths")
+        # Docs' code examples use milliseconds.
+        body = {**(body or {}), "timestamp": int(time.time() * 1000)}
+        payload, signature = sign(body, self._secret)
+        headers = {"Content-Type": "application/json",
+                   "X-AUTH-APIKEY": self._key, "X-AUTH-SIGNATURE": signature}
+        resp = self.http.request(method, API_BASE + path, content=payload, headers=headers)
+        # Log what was sent and what came back, never the key or signature.
+        log.info("%s %s body=%s -> %s", method, path, payload, resp.status_code)
+        if resp.status_code != 200:
+            raise CoinDCXError(f"{method} {path} -> {resp.status_code}: {resp.text[:200]}")
+        return resp.json()
+
+    def futures_wallets(self) -> list[dict]:
+        # The docs send this one as GET with a signed JSON body.
+        return self._signed_request("GET", "/exchange/v1/derivatives/futures/wallets")
