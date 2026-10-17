@@ -27,7 +27,7 @@ def report(title: str, result: backtest.BacktestResult) -> dict:
     print(f"  Fees + slippage    {c['fees_and_slippage']:8.2%}  of starting capital")
     print(f"  Funding            {c['funding']:8.2%}  of starting capital")
     print(f"  TDS withheld       {c['tds_withheld']:8.2%}  of starting capital ({c['tds_mode']} mode)")
-    print(f"  Turnover           {c['turnover']:8.1f}x")
+    print(f"  Turnover           {c['turnover']:8.1f}x    stop-outs {int(result.bars['stopped'].sum())}")
     print(f"  ! {c['funding_note']}")
     return m
 
@@ -44,13 +44,14 @@ def main():
     print(f"{pair} {args.timeframe}: {len(df)} bars, "
           f"{df.index[0]:%Y-%m-%d} -> {df.index[-1]:%Y-%m-%d} UTC")
 
-    def run(signal: pd.Series) -> backtest.BacktestResult:
+    def run(signal: pd.Series, stops: pd.Series | None = None) -> backtest.BacktestResult:
         return backtest.run(df["close"], signal, settings.costs_for(pair), args.timeframe,
-                            settings.tds_bps, settings.tds_mode, settings.max_leverage)
+                            settings.tds_bps, settings.tds_mode, settings.max_leverage,
+                            stop_distance=stops, ohlc=df if stops is not None else None)
 
     strategy = MACrossover()
     params = strategy.fit(df)  # fixed defaults; nothing is fitted on this data
-    result = run(strategy.signal(df, params))
+    result = run(strategy.signal(df, params), strategy.stop_distance(df, params))
     m = report(f"{strategy.name} {params}", result)
     with trials.connect() as conn:  # every run is a trial, logged automatically
         trials.record(conn, kind="backtest", strategy=strategy.name, params=params,

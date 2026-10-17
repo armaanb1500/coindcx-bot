@@ -19,3 +19,11 @@ class Strategy(ABC):
         NaN means "no opinion yet" (indicator warmup) and is treated as flat.
         Do NOT shift: the engine does that.
         """
+
+    @abstractmethod
+    def stop_distance(self, df: pd.DataFrame, params: dict) -> pd.Series:
+        """Stop distance in price units for a position opened at each bar's close.
+
+        Every strategy must have one: live orders always carry a stop, so the
+        backtest must too. Same rule as signal(): data up to that close only.
+        """

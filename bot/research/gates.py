@@ -3,6 +3,7 @@
 Each check returns a Gate with a plain reason, so a rejection always says why.
 """
 
+import hashlib
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,16 +22,36 @@ class Gate:
     detail: str
 
 
-def critic(strategy_name: str, critic_dir: Path = CRITIC_DIR) -> Gate:
-    """Gate 1. The review itself is written by hand (or by Claude) as markdown and
-    must end with 'Verdict: PASS' or 'Verdict: FAIL'."""
+# The code a critic review covers: the strategy plus the engine it runs through.
+# If any of it changes, the review is stale and must be redone.
+REVIEWED_CODE = ["bot/research/backtest.py", "bot/data/coindcx.py", "bot/data/store.py"]
+
+
+def code_hash(strategy_file: str, files: list[str] = REVIEWED_CODE) -> str:
+    h = hashlib.sha256()
+    for f in [strategy_file, *files]:
+        h.update(Path(f).read_bytes())
+    return h.hexdigest()[:12]
+
+
+def critic(strategy_name: str, strategy_file: str, critic_dir: Path = CRITIC_DIR,
+           files: list[str] = REVIEWED_CODE) -> Gate:
+    """Gate 1. The review is written by hand (or by Claude) as markdown. It must
+    contain 'Code hash: <hash>' matching the current code, and end with
+    'Verdict: PASS' or 'Verdict: FAIL'."""
     path = critic_dir / f"{strategy_name}.md"
     if not path.exists():
         return Gate("1. Critic review", False, f"not done: {path} missing")
-    found = re.search(r"^Verdict:\s*(PASS|FAIL)\b", path.read_text(), re.MULTILINE)
+    text = path.read_text()
+    current = code_hash(strategy_file, files)
+    reviewed = re.search(r"^Code hash:\s*(\w+)", text, re.MULTILINE)
+    if not reviewed or reviewed.group(1) != current:
+        return Gate("1. Critic review", False,
+                    f"STALE: code changed since {path} was written (now {current})")
+    found = re.search(r"^Verdict:\s*(PASS|FAIL)\b", text, re.MULTILINE)
     if not found:
         return Gate("1. Critic review", False, f"{path} has no 'Verdict: PASS|FAIL' line")
-    return Gate("1. Critic review", found.group(1) == "PASS", f"see {path}")
+    return Gate("1. Critic review", found.group(1) == "PASS", f"see {path} (code {current})")
 
 
 def deflated_sharpe(dsr: dict, s: Settings) -> Gate:

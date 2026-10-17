@@ -105,3 +105,22 @@ def test_resample_drops_bin_that_history_starts_inside():
     hourly = pd.DataFrame({"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "volume": 1.0}, index=idx)
     four = resample(hourly, "4h", source_timeframe="1h")
     assert list(four.index.hour) == [4]  # 00:00 bin only has 02:00-03:00
+
+
+def price_client(ls, minute_close):
+    def handler(request: httpx.Request):
+        if "current_prices" in request.url.path:
+            return httpx.Response(200, json={"prices": {"B-BTC_USDT": {"ls": ls}}})
+        t = int((pd.Timestamp.now(tz="UTC").floor("min") - pd.Timedelta(minutes=2)).timestamp() * 1000)
+        return httpx.Response(200, json={"s": "ok", "data": [
+            {"open": 1, "high": 1, "low": 1, "close": minute_close, "volume": 1, "time": t}]})
+    return PublicClient(http=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_current_price_uses_live_price_when_it_agrees_with_candle():
+    assert price_client(80000.0, 80100.0).current_price("B-BTC_USDT") == 80000.0
+
+
+def test_current_price_refuses_when_sources_disagree():
+    with pytest.raises(CoinDCXError, match="disagree"):
+        price_client(80000.0, 81000.0).current_price("B-BTC_USDT")  # 1.2% apart

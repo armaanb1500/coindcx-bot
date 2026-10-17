@@ -6,17 +6,35 @@ from bot.research import gates
 S = Settings(_env_file=None)
 
 
+def critic(tmp_path, text=None):
+    code = tmp_path / "strategy.py"
+    if not code.exists():
+        code.write_text("x = 1\n")
+    if text is not None:
+        (tmp_path / "x.md").write_text(text)
+    return gates.critic("x", str(code), tmp_path, files=[])
+
+
 def test_critic_missing_or_unclear_fails(tmp_path):
-    assert not gates.critic("x", tmp_path).passed
-    (tmp_path / "x.md").write_text("looks fine to me")
-    assert not gates.critic("x", tmp_path).passed
+    assert not critic(tmp_path).passed
+    h = gates.code_hash(str(tmp_path / "strategy.py"), files=[])
+    assert not critic(tmp_path, f"Code hash: {h}\nlooks fine to me").passed
 
 
 def test_critic_reads_verdict_line(tmp_path):
-    (tmp_path / "x.md").write_text("# review\n...\nVerdict: PASS\n")
-    assert gates.critic("x", tmp_path).passed
-    (tmp_path / "x.md").write_text("# review\nVerdict: FAIL\n")
-    assert not gates.critic("x", tmp_path).passed
+    critic(tmp_path)  # creates the strategy file
+    h = gates.code_hash(str(tmp_path / "strategy.py"), files=[])
+    assert critic(tmp_path, f"# review\nCode hash: {h}\nVerdict: PASS\n").passed
+    assert not critic(tmp_path, f"# review\nCode hash: {h}\nVerdict: FAIL\n").passed
+
+
+def test_critic_goes_stale_when_code_changes(tmp_path):
+    critic(tmp_path)
+    h = gates.code_hash(str(tmp_path / "strategy.py"), files=[])
+    assert critic(tmp_path, f"Code hash: {h}\nVerdict: PASS\n").passed
+    (tmp_path / "strategy.py").write_text("x = 2\n")
+    result = critic(tmp_path)
+    assert not result.passed and "STALE" in result.detail
 
 
 def test_dsr_gate_is_strictly_above_threshold():

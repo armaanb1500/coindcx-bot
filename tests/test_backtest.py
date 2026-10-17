@@ -144,3 +144,16 @@ def test_baseline_signal_uses_only_past_data():
     partial = strat.signal(future_changed, strat.fit(df))
     pd.testing.assert_series_equal(full.iloc[:300], partial.iloc[:300])
     assert full.iloc[:19].isna().all() and full.iloc[19:].notna().all()
+
+
+def test_baseline_stop_distance_is_trailing_and_positive():
+    rng = np.random.default_rng(4)
+    close = random_walk(300, seed=4)
+    df = pd.DataFrame({"close": close, "high": close * (1 + rng.uniform(0, 0.02, 300)),
+                       "low": close * (1 - rng.uniform(0, 0.02, 300))})
+    strat = MACrossover()
+    dist = strat.stop_distance(df, strat.fit(df))
+    changed = df.copy()
+    changed.iloc[200:] *= 2
+    pd.testing.assert_series_equal(dist.iloc[:200], strat.stop_distance(changed, strat.fit(df)).iloc[:200])
+    assert dist.iloc[:13].isna().all() and (dist.iloc[14:] > 0).all()

@@ -6,10 +6,20 @@ close using only data up to that close. 1.0 = long 100% of equity in notional,
 
 The engine shifts the signal by one bar itself, so a strategy can't forget to:
 a signal at bar t becomes the position held through bar t+1.
+
+Stops (optional): a stop distance per bar, in price units. A position opened at
+bar t's close gets its stop at close_t -/+ distance_t. During each later bar, if
+the low (long) or high (short) reaches the stop, the position exits at the stop,
+or at the open if the bar gapped through it. After a stop-out the position stays
+flat until the signal changes. A new position with no stop distance isn't taken.
+
+Position tracking is a plain loop because exits depend on the path; everything
+after it (costs, equity) is vectorized.
 """
 
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from bot.config import InstrumentCosts
@@ -48,7 +58,9 @@ class BacktestResult:
 
 
 def run(close: pd.Series, signal: pd.Series, costs: InstrumentCosts, timeframe: str,
-        tds_bps: float, tds_mode: str, max_leverage: float) -> BacktestResult:
+        tds_bps: float, tds_mode: str, max_leverage: float,
+        stop_distance: pd.Series | None = None, ohlc: pd.DataFrame | None = None
+        ) -> BacktestResult:
     if not close.index.equals(signal.index):
         raise ValueError("signal and close must share the same index")
     if tds_mode not in ("track", "cost"):
@@ -59,14 +71,22 @@ def run(close: pd.Series, signal: pd.Series, costs: InstrumentCosts, timeframe: 
         raise ValueError(f"signal exceeds max_leverage={max_leverage} at {too_big.idxmax()}: "
                          f"{signal[too_big].iloc[0]}")
 
-    # Act on the next bar. NaN signal (indicator warmup) means flat.
-    position = signal.fillna(0.0).shift(1, fill_value=0.0)
+    if stop_distance is not None:
+        if ohlc is None:
+            raise ValueError("stops need ohlc with open/high/low columns")
+        if not (stop_distance.index.equals(close.index) and ohlc.index.equals(close.index)):
+            raise ValueError("stop_distance and ohlc must share close's index")
+
+    sim = _simulate(close, signal.fillna(0.0), stop_distance, ohlc)
+    idx = close.index
+    position = pd.Series(sim["position"], index=idx)
     # Simple returns, not log returns: exact for leverage and shorts.
     returns = close.pct_change().fillna(0.0)
-    gross = position * returns
+    gross = pd.Series(sim["gross"], index=idx)
 
-    change = position.diff().fillna(position)  # first bar: from flat to position
-    turnover = change.abs()
+    entry_change = pd.Series(sim["entry_change"], index=idx)  # at the bar's start
+    exit_change = pd.Series(sim["exit_change"], index=idx)    # stop exits, during the bar
+    turnover = entry_change.abs() + exit_change.abs()
     trading_cost = turnover * (costs.fee_bps + costs.slippage_bps) / 1e4
 
     # Constant funding, paid on whatever is held, long or short.
@@ -74,7 +94,7 @@ def run(close: pd.Series, signal: pd.Series, costs: InstrumentCosts, timeframe: 
     funding_cost = position.abs() * costs.funding_bps_per_interval / 1e4 * intervals_per_bar
 
     # TDS is withheld on the sell leg of each trade: closing a long or opening a short.
-    sold = (-change).clip(lower=0.0)
+    sold = (-entry_change).clip(lower=0.0) + (-exit_change).clip(lower=0.0)
     tds = sold * tds_bps / 1e4
 
     net = gross - trading_cost - funding_cost
@@ -86,12 +106,64 @@ def run(close: pd.Series, signal: pd.Series, costs: InstrumentCosts, timeframe: 
         "close": close, "signal": signal, "position": position, "return": returns,
         "gross": gross, "turnover": turnover, "trading_cost": trading_cost,
         "funding_cost": funding_cost, "tds": tds, "net": net,
+        "stop": sim["stop"], "stopped": sim["stopped"],
         "equity_gross": _compound(gross), "equity": equity,
     })
     note = (f"funding: CONSTANT {costs.funding_bps_per_interval} bps per "
             f"{costs.funding_interval_hours}h on |position|, charged long or short "
             f"(no historical funding data available)")
     return BacktestResult(bars, timeframe, tds_mode, note)
+
+
+def _simulate(close: pd.Series, target: pd.Series, stop_distance: pd.Series | None,
+              ohlc: pd.DataFrame | None) -> dict:
+    """Walk bar by bar: what's held during each bar, and what it earned."""
+    c = close.to_numpy(dtype=float)
+    want_by_bar = target.to_numpy(dtype=float)
+    stops_on = stop_distance is not None
+    if stops_on:
+        dist = stop_distance.to_numpy(dtype=float)
+        o, h, lo = (ohlc[k].to_numpy(dtype=float) for k in ("open", "high", "low"))
+
+    n = len(c)
+    out = {k: np.zeros(n) for k in ("position", "gross", "entry_change", "exit_change")}
+    out["stop"] = np.full(n, np.nan)
+    out["stopped"] = np.zeros(n, dtype=bool)
+
+    held, stop, blocked = 0.0, np.nan, None  # blocked: a target we were stopped out of
+    for t in range(1, n):
+        want = want_by_bar[t - 1]  # decided at the previous close: act on the next bar
+        if blocked is not None:
+            if want == blocked:
+                want = 0.0  # stay out until the signal changes
+            else:
+                blocked = None
+        opening = want != 0 and (held == 0 or np.sign(want) != np.sign(held))
+        if opening and stops_on:
+            if dist[t - 1] > 0:
+                stop = c[t - 1] - np.sign(want) * dist[t - 1]
+            else:
+                want = 0.0  # no stop available: no naked positions
+        out["entry_change"][t] = want - held
+        held = want
+        if held == 0:
+            stop = np.nan
+        out["position"][t] = held
+        out["stop"][t] = stop
+
+        exit_price = c[t]
+        hit = False
+        if stops_on and held > 0 and lo[t] <= stop:
+            exit_price, hit = min(o[t], stop), True  # gap down through the stop fills at the open
+        elif stops_on and held < 0 and h[t] >= stop:
+            exit_price, hit = max(o[t], stop), True
+        out["gross"][t] = held * (exit_price / c[t - 1] - 1)
+        if hit:
+            out["stopped"][t] = True
+            out["exit_change"][t] = -held
+            blocked = want_by_bar[t - 1]
+            held, stop = 0.0, np.nan
+    return out
 
 
 def _compound(returns: pd.Series) -> pd.Series:

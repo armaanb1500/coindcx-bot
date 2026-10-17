@@ -95,6 +95,25 @@ class PublicClient:
         # A bar is only usable once it has closed.
         return df[df.index + bar <= now]
 
+    def current_price(self, pair: str, max_disagreement: float = 0.005) -> float:
+        """Last traded price, cross-checked against the last closed 1-minute candle.
+
+        `ls` from the live-prices endpoint has no description in the docs; it is
+        used as the last price (owner's decision), but only if it agrees with the
+        documented candle endpoint to within max_disagreement (0.5%).
+        """
+        data = self._get(f"{PUBLIC_BASE}/market_data/v3/current_prices/futures/rt", {})
+        live = float(data["prices"][pair]["ls"])
+        now = pd.Timestamp.now(tz="UTC")
+        minute = self.candles(pair, "1", now - pd.Timedelta(minutes=10), now)
+        if minute.empty:
+            raise CoinDCXError(f"no recent 1-minute candle for {pair} to cross-check against")
+        check = float(minute["close"].iloc[-1])
+        if abs(live - check) / check > max_disagreement:
+            raise CoinDCXError(f"{pair}: live price {live} and last 1m close {check} disagree "
+                               f"by more than {max_disagreement:.1%}")
+        return live
+
 
 def _utc(ts) -> pd.Timestamp:
     ts = pd.Timestamp(ts)

@@ -74,7 +74,7 @@ def walk_forward(df: pd.DataFrame, strategy: Strategy, train_bars: int, test_bar
     if len(df) < train_bars + test_bars:
         raise ValueError(f"need at least {train_bars + test_bars} bars, have {len(df)}")
 
-    folds, pieces = [], []
+    folds, signals, stops = [], [], []
     test_start = train_bars
     while test_start + test_bars <= len(df):
         train = df.iloc[(0 if anchored else test_start - train_bars):test_start]
@@ -83,12 +83,13 @@ def walk_forward(df: pd.DataFrame, strategy: Strategy, train_bars: int, test_bar
 
         # Compute over warmup + test, then keep only the test bars.
         window = df.iloc[test_start - warmup_bars:test_start + test_bars]
-        signal = strategy.signal(window, params).loc[test.index]
-        pieces.append(signal)
+        signals.append(strategy.signal(window, params).loc[test.index])
+        stops.append(strategy.stop_distance(window, params).loc[test.index])
         folds.append(Fold(train.index[0], test.index[0], test.index[-1], params))
         test_start += test_bars
 
-    oos_signal = pd.concat(pieces)
-    oos_close = df["close"].loc[oos_signal.index]
-    result = backtest.run(oos_close, oos_signal, costs, timeframe, tds_bps, tds_mode, max_leverage)
+    oos_signal = pd.concat(signals)
+    oos = df.loc[oos_signal.index]
+    result = backtest.run(oos["close"], oos_signal, costs, timeframe, tds_bps, tds_mode,
+                          max_leverage, stop_distance=pd.concat(stops), ohlc=oos)
     return WalkForwardResult(folds, result)

@@ -7,6 +7,7 @@ Writes reports/<strategy>_<pair>_<timeframe>.md and prints the same text.
 """
 
 import argparse
+import inspect
 from pathlib import Path
 
 import pandas as pd
@@ -45,7 +46,8 @@ def main():
 
     # 1. Full-sample backtest (the trial the DSR judges).
     params = strategy.fit(df)
-    full = backtest.run(df["close"], strategy.signal(df, params), **run_args)
+    full = backtest.run(df["close"], strategy.signal(df, params), **run_args,
+                        stop_distance=strategy.stop_distance(df, params), ohlc=df)
     full_m = metrics.summary(full.net, full.equity, tf)
 
     # 2. Walk-forward, out of sample.
@@ -69,7 +71,7 @@ def main():
     verdict = regimes.edge_verdict(regime_table)
 
     results = [
-        gates.critic(strategy.name),
+        gates.critic(strategy.name, inspect.getfile(type(strategy))),
         gates.deflated_sharpe(dsr, s),
         gates.walk_forward(wf_s, s),
         gates.regimes(regime_table, verdict, s),
@@ -108,6 +110,7 @@ def render(name, params, pair, tf, df, args, full, full_m, wf, wf_m, wf_s, dsr, 
         f"| Max drawdown | {pct(full_m['max_drawdown'])} |",
         f"| Longest drawdown | {full_m['longest_drawdown_bars']} bars ({full_m['longest_drawdown']}) |",
         f"| Calmar | {full_m['calmar']:.2f} |",
+        f"| Stop-outs | {int(full.bars['stopped'].sum())} |",
         f"| Gross / net return | {pct(c['gross_return'])} / {pct(c['net_return'])} |",
         f"| Fees + slippage | {pct(c['fees_and_slippage'])} of starting capital |",
         f"| Funding | {pct(c['funding'])} of starting capital |",
