@@ -99,3 +99,53 @@ def test_card_shows_everything_the_spec_requires(setup):
     buttons = keyboard(p.id).inline_keyboard[0]
     assert [b.text for b in buttons] == ["Approve", "Reject"]
     assert all(len(b.callback_data.encode()) <= 64 for b in buttons)  # Telegram's limit
+
+
+# --- flips, stops, health -------------------------------------------------------
+
+from bot.live import executor, health  # noqa: E402
+
+
+def test_flip_closes_old_position_and_opens_new(setup):
+    service, conn, _ = setup
+    first = add(conn)
+    service.on_button(ME, f"approve:{first.id}")
+    old = db.open_position_for(conn, "B-BTC_USDT")
+    flip = add(conn, side="sell", stop=82000.0, kind="flip", closes_position_id=old["id"])
+    text = service.on_button(ME, f"approve:{flip.id}")
+    assert "Closed buy" in text and "PAPER fill: sell" in text
+    positions = conn.execute("SELECT side, closed_at, exit_reason FROM positions ORDER BY id").fetchall()
+    assert [(r["side"], r["closed_at"] is not None, r["exit_reason"]) for r in positions] == \
+        [("buy", True, "signal"), ("sell", False, None)]
+
+
+def test_stop_monitor_closes_at_the_worse_price(setup):
+    service, conn, price = setup
+    p = add(conn)  # long, stop 78000
+    service.on_button(ME, f"approve:{p.id}")
+    price["B-BTC_USDT"] = 78500.0
+    assert executor.check_stops(conn, lambda pair: price[pair], service.s) == []
+    price["B-BTC_USDT"] = 77000.0  # gapped through the stop
+    [msg] = executor.check_stops(conn, lambda pair: price[pair], service.s)
+    assert "STOP HIT" in msg
+    pos = conn.execute("SELECT * FROM positions").fetchone()
+    assert pos["exit_price"] < 77000.0 and pos["exit_reason"] == "stop"
+    assert executor.check_stops(conn, lambda pair: price[pair], service.s) == []  # closed once
+
+
+def test_health_halts_on_drawdown_and_decayed_sharpe():
+    flat = health.daily_returns({}, 100_000, "2026-09-01", "2026-09-30")
+    assert health.check(flat, backtest_sharpe=1.0, backtest_max_dd=-0.2) != []  # Sharpe 0 < 0.5
+    bad = health.daily_returns({"2026-09-02": -40_000}, 100_000, "2026-09-01", "2026-09-05")
+    assert any("drawdown" in p for p in health.check(bad, 1.0, -0.2))  # -40% < -30%
+    ok = health.daily_returns({"2026-09-02": 1_000}, 100_000, "2026-09-01", "2026-09-05")
+    assert health.check(ok, 1.0, -0.2) == []  # too early to judge Sharpe, drawdown fine
+
+
+def test_card_shows_label_and_flip(setup):
+    service, conn, _ = setup
+    p = add(conn, side="sell", stop=82000.0, kind="flip", closes_position_id=1,
+            label="PLUMBING TEST")
+    text = format_card(db.get_proposal(conn, p.id), service.s)
+    assert text.startswith("[PLUMBING TEST]")
+    assert "FLIP: closes your open LONG first" in text

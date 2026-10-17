@@ -53,8 +53,48 @@ def execute(conn, proposal_id: str, current_price: PriceFn, s: Settings) -> Exec
     costs = s.costs_for(p["pair"])
     direction = 1 if p["side"] == "buy" else -1
     fill_price = price * (1 + direction * costs.slippage_bps / 1e4)
+    lines = []
+
+    if p["kind"] == "flip" and p["closes_position_id"] is not None:
+        old = conn.execute("SELECT * FROM positions WHERE id = ?",
+                           (p["closes_position_id"],)).fetchone()
+        if old is not None and old["closed_at"] is None:
+            exit_fee = fill_price * old["quantity"] * costs.fee_bps / 1e4
+            db.record_fill(conn, order_id, fill_price, old["quantity"], exit_fee, simulated=True)
+            pnl = db.close_position(conn, old["id"], fill_price, exit_fee, "signal")
+            lines.append(f"Closed {old['side']} {old['quantity']} at {fill_price:.2f}: "
+                         f"P&L ₹{pnl:,.0f}")
+        else:
+            lines.append("The position to close was already closed (stopped out); opening only.")
+
     fee = fill_price * p["quantity"] * costs.fee_bps / 1e4
     db.record_fill(conn, order_id, fill_price, p["quantity"], fee, simulated=True)
+    db.open_position(conn, proposal_id, "paper", p["pair"], p["side"], p["quantity"], fill_price,
+                     p["stop"], fee, p["usdt_inr"])
     db.set_status(conn, proposal_id, "filled", "paper fill")
-    return ExecResult(True, f"PAPER fill: {p['side']} {p['quantity']} {p['pair']} at "
-                            f"{fill_price:.2f} (stop {p['stop']}). No real order was sent.")
+    lines.append(f"PAPER fill: {p['side']} {p['quantity']} {p['pair']} at {fill_price:.2f} "
+                 f"(stop {p['stop']:.2f}). No real order was sent.")
+    return ExecResult(True, "\n".join(lines))
+
+
+def check_stops(conn, current_price: PriceFn, s: Settings) -> list[str]:
+    """Paper stop monitor: close any open position whose stop has been reached.
+
+    Polling can only see the price now, so the exit is the WORSE of the stop and the
+    current price (plus slippage): a gap through the stop is never filled at the stop.
+    """
+    messages = []
+    for pos in db.open_positions(conn):
+        price = current_price(pos["pair"])
+        long = pos["side"] == "buy"
+        if not (price <= pos["stop"] if long else price >= pos["stop"]):
+            continue
+        costs = s.costs_for(pos["pair"])
+        worst = min(price, pos["stop"]) if long else max(price, pos["stop"])
+        exit_price = worst * (1 - (1 if long else -1) * costs.slippage_bps / 1e4)
+        fee = exit_price * pos["quantity"] * costs.fee_bps / 1e4
+        pnl = db.close_position(conn, pos["id"], exit_price, fee, "stop")
+        if pnl is not None:
+            messages.append(f"PAPER STOP HIT: {pos['pair']} {pos['side']} closed at "
+                            f"{exit_price:.2f} (stop {pos['stop']:.2f}). P&L ₹{pnl:,.0f}")
+    return messages

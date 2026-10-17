@@ -8,6 +8,7 @@ else is ignored silently.
 """
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
@@ -18,9 +19,19 @@ from bot.live.executor import PriceFn
 from bot.log import db
 
 
+# All blocking work (SQLite, HTTP) runs on this ONE thread, so it never runs
+# concurrently and never blocks Telegram's event loop.
+_WORKER = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bot-worker")
+
+
+async def run_blocking(fn, *args):
+    return await asyncio.get_running_loop().run_in_executor(_WORKER, fn, *args)
+
+
 def format_card(p, s: Settings) -> str:
     direction = "LONG" if p["side"] == "buy" else "SHORT"
-    lines = [
+    lines = [f"[{p['label']}]"] if p["label"] else []
+    lines += [
         f"{'PAPER ' if p['mode'] == 'paper' else ''}PROPOSAL: {direction} {p['pair']}",
         f"Entry   {p['entry']:,.2f} USDT",
         f"Stop    {p['stop']:,.2f} USDT",
@@ -32,6 +43,8 @@ def format_card(p, s: Settings) -> str:
         f"Leverage {p['leverage']:g}x",
         f"Loss if stop hits: ₹{p['loss_at_stop_inr']:,.0f} ({p['loss_at_stop_pct']:.2%} of capital)",
         f"Strategy {p['strategy']}",
+        *([f"FLIP: closes your open {'SHORT' if direction == 'LONG' else 'LONG'} first"]
+          if p["kind"] == "flip" else []),
         f"Signal  {p['signal_time']}",
         f"Expires {p['expires_at'][11:19]} UTC",
     ]
@@ -83,9 +96,12 @@ class ApprovalService:
 
 # --- Telegram wiring ------------------------------------------------------------
 
-def build_app(service: ApprovalService) -> Application:
+def build_app(service: ApprovalService, post_init=None) -> Application:
     token = service.s.telegram_bot_token.get_secret_value()
-    app = Application.builder().token(token).build()
+    builder = Application.builder().token(token)
+    if post_init is not None:
+        builder = builder.post_init(post_init)
+    app = builder.build()
 
     async def button(update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -93,18 +109,17 @@ def build_app(service: ApprovalService) -> Application:
         if not service.authorized(chat_id):
             return  # silent: don't even acknowledge the tap
         await query.answer()
-        # The price fetch and SQLite calls are blocking; keep them off the event loop.
-        text = await asyncio.to_thread(service.on_button, chat_id, query.data or "")
+        text = await run_blocking(service.on_button, chat_id, query.data or "")
         if text:
             await query.edit_message_text(f"{query.message.text}\n\n{text}")
 
     async def halt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = service.on_halt(update.effective_chat.id)
+        text = await run_blocking(service.on_halt, update.effective_chat.id)
         if text:
             await update.message.reply_text(text)
 
     async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        text = service.on_status(update.effective_chat.id)
+        text = await run_blocking(service.on_status, update.effective_chat.id)
         if text:
             await update.message.reply_text(text)
 
@@ -115,7 +130,11 @@ def build_app(service: ApprovalService) -> Application:
 
 
 async def send_proposal(app: Application, service: ApprovalService, proposal_id: str) -> None:
-    p = db.get_proposal(service.conn, proposal_id)
+    p = await run_blocking(db.get_proposal, service.conn, proposal_id)
     msg = await app.bot.send_message(service.s.telegram_chat_id, format_card(p, service.s),
                                      reply_markup=keyboard(proposal_id))
-    db.set_message_id(service.conn, proposal_id, msg.message_id)
+    await run_blocking(db.set_message_id, service.conn, proposal_id, msg.message_id)
+
+
+async def notify(app: Application, service: ApprovalService, text: str) -> None:
+    await app.bot.send_message(service.s.telegram_chat_id, text)

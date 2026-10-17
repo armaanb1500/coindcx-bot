@@ -77,3 +77,41 @@ def test_timestamps_without_microseconds_still_compare_correctly(conn):
     p = proposal(created_at=whole_second - timedelta(minutes=5))  # expires exactly at whole_second
     db.insert_proposal(conn, p)
     assert not db.decide(conn, p.id, "approve", 1, at=whole_second + timedelta(microseconds=1))[0]
+
+
+# --- paper positions ------------------------------------------------------------
+
+def open_btc(conn, side="buy", entry=80000.0, qty=0.01, fee=0.5, rate=100.0):
+    p = proposal(side=side)
+    db.insert_proposal(conn, p)
+    return db.open_position(conn, p.id, "paper", "B-BTC_USDT", side, qty, entry, 78000.0, fee, rate)
+
+
+def test_position_pnl_long_and_short_after_fees(conn):
+    long_id = open_btc(conn)
+    # +1000 USDT/BTC on 0.01 BTC = +10 USDT, minus 0.5 + 0.5 fees = 9 USDT = 900 INR
+    assert db.close_position(conn, long_id, 81000.0, 0.5, "signal") == pytest.approx(900.0)
+    short_id = open_btc(conn, side="sell")
+    assert db.close_position(conn, short_id, 81000.0, 0.5, "stop") == pytest.approx(-1100.0)
+
+
+def test_position_can_only_close_once(conn):
+    pid = open_btc(conn)
+    assert db.close_position(conn, pid, 81000.0, 0.5, "stop") is not None
+    assert db.close_position(conn, pid, 70000.0, 0.5, "stop") is None
+    assert db.realized_pnl_since(conn, datetime.now(UTC) - timedelta(hours=1)) == pytest.approx(900.0)
+
+
+def test_only_one_open_position_per_pair(conn):
+    open_btc(conn)
+    with pytest.raises(Exception):
+        open_btc(conn)
+
+
+def test_open_positions_and_daily_pnl(conn):
+    a = open_btc(conn)
+    assert db.open_position_for(conn, "B-BTC_USDT")["id"] == a
+    db.close_position(conn, a, 81000.0, 0.5, "signal")
+    assert db.open_positions(conn) == []
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    assert db.daily_pnl(conn) == {today: pytest.approx(900.0)}

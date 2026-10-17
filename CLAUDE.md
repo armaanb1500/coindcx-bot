@@ -160,6 +160,10 @@ Phase 3 decisions (owner, 2026-10-18):
 - **Paper source:** until a strategy passes every gate, paper mode runs the REJECTED baseline on 1h bars purely to test the plumbing. Every card is labelled as a plumbing test. This never carries over to live: live mode only runs gate-passing strategies.
 - **Stops are part of the strategy and are modelled in the backtest.** Strategies return a stop with each signal; the engine exits when a bar's high/low crosses it (at the open if the bar gapped through). What gets validated is what gets traded. Strategies are re-run through the gates after this change.
 - **Current price:** `ls` from the live-prices endpoint, refused if it differs from the last 1-minute candle close by more than 0.5%.
+- **Exits:** a signal flip is one "flip" proposal (close the open position, then open the new one), approved like any other. Stops are part of the approved order and close without a further tap. Close-only proposals (signal goes flat) aren't built yet; the baseline is never flat.
+- **Paper stop monitor** polls the price every ~20s and fills at the worse of the stop and the current price, plus slippage.
+- **Health check** uses realized P&L per UTC day against `capital_inr`, and the full-sample 1h BTC backtest as the reference.
+- **Known backtest/live gap, fix before Phase 4:** the backtest holds `exposure` x equity notional, while live sizes by risk with a 20% notional cap. Sharpe is roughly comparable; returns and drawdowns are not.
 - **Sizing:** `max_position_pct` caps notional (not margin) at 20% of `capital_inr`. A position over the cap is shrunk, not refused; leverage over `max_leverage` is refused. The owner sets `CAPITAL_INR` in `.env`.
 
 ## Risk limits (defaults, all in config)
