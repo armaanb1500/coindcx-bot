@@ -112,6 +112,8 @@ def _to_frame(rows: list[dict]) -> pd.DataFrame:
 # Withdrawal and transfer endpoints must never appear here.
 READ_ONLY_PATHS = {
     "/exchange/v1/derivatives/futures/wallets",
+    "/exchange/v1/derivatives/futures/positions",
+    "/api/v1/derivatives/futures/data/conversions",
 }
 
 
@@ -155,3 +157,14 @@ class PrivateClient:
     def futures_wallets(self) -> list[dict]:
         # The docs send this one as GET with a signed JSON body.
         return self._signed_request("GET", "/exchange/v1/derivatives/futures/wallets")
+
+    def positions(self, margin: str = "INR") -> list[dict]:
+        # Docs: POST, page/size as strings. active_pos < 0 means short.
+        return self._signed_request("POST", "/exchange/v1/derivatives/futures/positions",
+                                    {"page": "1", "size": "100",
+                                     "margin_currency_short_name": [margin]})
+
+    def usdt_inr_rate(self) -> float:
+        # The docs' header says POST, but POST returns 404 live; their example uses GET.
+        rows = self._signed_request("GET", "/api/v1/derivatives/futures/data/conversions")
+        return float(next(r["conversion_price"] for r in rows if r["symbol"] == "USDTINR"))

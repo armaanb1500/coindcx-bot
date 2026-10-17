@@ -61,6 +61,13 @@ class Settings(BaseSettings):
     regime_min_positive: int = 2  # edge must show up in at least 2 of bull/bear/chop
     leakage_sharpe: float = 2.0  # annualized; above this is presumed leakage
 
+    # Capital the bot sizes against, in rupees. You set it; the bot can't read it
+    # reliably because CoinDCX documents the wallet's balance field as "ignore this".
+    # 0 means "not set", and the live stack refuses to propose anything.
+    capital_inr: float = 0.0
+    margin_currency: Literal["INR", "USDT"] = "INR"
+    leverage: float = 1.0  # leverage each proposal uses; must be <= max_leverage
+
     # Risk limits.
     risk_pct_per_trade: float = 0.01
     max_position_pct: float = 0.20

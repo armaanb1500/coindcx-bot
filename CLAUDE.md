@@ -92,6 +92,12 @@ reports/
 - Live fees on 2026-10-17 (percent, which looks like it includes 18% GST): BTC maker 0.0236 / taker 0.059; XAU maker 0.0118 / taker 0.0118. Funding every 8h for BTC, every 4h for XAU.
 - **No public funding-rate history endpoint is documented**, so the backtest uses a constant pessimistic funding cost and labels it in the output.
 - The futures section of the docs lists no rate limits, so the client backs off on 429 and 5xx responses.
+- Signing (checked 2026-10-18): body = compact JSON incl. `timestamp` in **ms**; `X-AUTH-SIGNATURE` = HMAC-SHA256 hex. Private calls go through an allowlist in `coindcx.py`.
+- Futures wallet: `GET /exchange/v1/derivatives/futures/wallets` (signed body). The docs say to ignore its `balance` field, so the bot sizes against `capital_inr` from config instead.
+- **The owner's futures wallet is INR-margined.** Prices and margin values are in USDT; CoinDCX converts at its own rate.
+- USDT/INR rate: `GET /api/v1/derivatives/futures/data/conversions` (the docs' header says POST; POST is 404 live).
+- Positions: `POST /exchange/v1/derivatives/futures/positions` with `page`, `size` (strings) and `margin_currency_short_name: ["INR"]`.
+- Live prices: `GET https://public.coindcx.com/market_data/v3/current_prices/futures/rt` returns `prices[pair]` with fields `ls`, `mp`, `fr` and more, but **most of the field descriptions are blank in the docs**. `ls` is used as the last price, cross-checked (see Phase 3 decisions).
 - Python: `uv` isn't installed, so the project uses `.venv` (Python 3.14). Run things with `.venv/bin/python -m ...`.
 
 ## Costs the backtest must model
@@ -149,6 +155,12 @@ Phase 2 choices (in `config.py`, change them there):
 - Walk-forward passes with >= 60% positive folds AND worst fold >= -15%.
 - Regime: bull/bear = close more than 5% above/below the 200-period MA, chop in between. Passes if Sharpe > 0 in at least 2 regimes with 30+ bars.
 - The leakage check (Sharpe > 2) applies to every timeframe, not just daily.
+
+Phase 3 decisions (owner, 2026-10-18):
+- **Paper source:** until a strategy passes every gate, paper mode runs the REJECTED baseline on 1h bars purely to test the plumbing. Every card is labelled as a plumbing test. This never carries over to live: live mode only runs gate-passing strategies.
+- **Stops are part of the strategy and are modelled in the backtest.** Strategies return a stop with each signal; the engine exits when a bar's high/low crosses it (at the open if the bar gapped through). What gets validated is what gets traded. Strategies are re-run through the gates after this change.
+- **Current price:** `ls` from the live-prices endpoint, refused if it differs from the last 1-minute candle close by more than 0.5%.
+- **Sizing:** `max_position_pct` caps notional (not margin) at 20% of `capital_inr`. A position over the cap is shrunk, not refused; leverage over `max_leverage` is refused. The owner sets `CAPITAL_INR` in `.env`.
 
 ## Risk limits (defaults, all in config)
 
