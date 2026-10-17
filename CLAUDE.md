@@ -45,8 +45,10 @@ bot/
     backtest.py      # vectorized engine
     metrics.py
     deflated.py      # deflated Sharpe ratio
+    trials.py        # SQLite trials table (data/research.db), every run logged
     walkforward.py
     regimes.py       # bull/bear/chop split by 200-period MA
+    gates.py         # the five validation gates
   strategies/
     base.py          # Strategy interface: fit(train) -> params, signal(df, params) -> Series
     baseline.py      # a simple baseline used to prove the pipeline end to end
@@ -63,7 +65,9 @@ tests/
 scripts/
   fetch_history.py
   run_backtest.py
-  run_walkforward.py
+  research_report.py # full report + gate verdict -> reports/
+reports/
+  critic/<strategy>.md  # critic review, must end with "Verdict: PASS|FAIL"
 .env.example
 ```
 
@@ -138,6 +142,13 @@ Critic checklist (run it against every strategy's code):
 6. Parameter fitting: how many parameters, and were they chosen on the full dataset?
 7. Sample: does the test period include both a bull and a bear regime?
 8. Data alignment: are all series in UTC with the same bar-close convention?
+
+Phase 2 choices (in `config.py`, change them there):
+- Trial count: a trial is a distinct (strategy, params, instrument, timeframe). Re-running the same config counts once, with its latest Sharpe. Counts are per instrument and timeframe because per-period Sharpes aren't comparable across bar sizes.
+- DSR is computed on the full-sample backtest returns.
+- Walk-forward passes with >= 60% positive folds AND worst fold >= -15%.
+- Regime: bull/bear = close more than 5% above/below the 200-period MA, chop in between. Passes if Sharpe > 0 in at least 2 regimes with 30+ bars.
+- The leakage check (Sharpe > 2) applies to every timeframe, not just daily.
 
 ## Risk limits (defaults, all in config)
 

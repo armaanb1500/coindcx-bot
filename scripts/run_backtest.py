@@ -9,7 +9,7 @@ import pandas as pd
 
 from bot.config import Settings
 from bot.data.store import CandleStore
-from bot.research import backtest, metrics
+from bot.research import backtest, metrics, trials
 from bot.strategies.baseline import MACrossover
 
 
@@ -50,12 +50,17 @@ def main():
 
     strategy = MACrossover()
     params = strategy.fit(df)  # fixed defaults; nothing is fitted on this data
-    m = report(f"{strategy.name} {params}", run(strategy.signal(df, params)))
+    result = run(strategy.signal(df, params))
+    m = report(f"{strategy.name} {params}", result)
+    with trials.connect() as conn:  # every run is a trial, logged automatically
+        trials.record(conn, kind="backtest", strategy=strategy.name, params=params,
+                      instrument=pair, timeframe=args.timeframe, net=result.net,
+                      source="run_backtest")
     report("buy and hold (for comparison)", run(pd.Series(1.0, index=df.index)))
 
     if args.timeframe == "1d" and m["sharpe"] > 2:
         print("\n!! Sharpe above 2 on daily data: treat as LEAKAGE until proven otherwise.")
-    print("\nPhase 1 report only. No validation gates have been run (that's Phase 2).")
+    print("\nNo validation gates here. For those: python -m scripts.research_report")
 
 
 if __name__ == "__main__":

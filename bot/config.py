@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     tds_bps: float = 100.0
     tds_mode: Literal["track", "cost"] = "track"
 
+    # Validation gates. dsr_min and leakage_sharpe come from the spec; the
+    # walk-forward and regime thresholds are defaults chosen in Phase 2.
+    dsr_min: float = 0.95
+    wf_min_positive_fold_frac: float = 0.6
+    wf_worst_fold_floor: float = -0.15  # worst single fold may lose at most 15%
+    regime_ma_period: int = 200
+    regime_band: float = 0.05
+    regime_min_positive: int = 2  # edge must show up in at least 2 of bull/bear/chop
+    leakage_sharpe: float = 2.0  # annualized; above this is presumed leakage
+
     # Risk limits.
     risk_pct_per_trade: float = 0.01
     max_position_pct: float = 0.20
